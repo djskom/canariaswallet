@@ -1,0 +1,513 @@
+AccountCreate.tsx : import React, { useCallback, useEffect, useState } from 'react';
+import { generateAccount } from '../utils/AccountUtils';
+import { Account } from '../models/Account';
+import AccountDetail from './AccountDetail';
+import { View, Text, TextInput, Button } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage'; // Importa AsyncStorage
+import 'react-native-get-random-values'
+
+const recoveryPhraseKeyName = 'recoveryPhrase';
+
+function AccountCreate() {
+  const [seedphrase, setSeedphrase] = useState('');
+  const [account, setAccount] = useState<Account | null>(null);
+  const [showRecoverInput, setShowRecoverInput] = useState(false);
+
+  const handleChange = (text: string) => {
+    setSeedphrase(text);
+  };
+
+  const handleRecoverPress = () => {
+    if (showRecoverInput) {
+      recoverAccount(seedphrase);
+    } else {
+      setShowRecoverInput(true);
+    }
+  };
+
+  const recoverAccount = useCallback(async (recoveryPhrase: string) => {
+    const result = await generateAccount(recoveryPhrase);
+    setAccount(result.account);
+
+    if (recoveryPhraseKeyName !== recoveryPhrase) {
+      try {
+        // Utiliza AsyncStorage para almacenar la frase de recuperación en lugar de localStorage
+        await AsyncStorage.setItem(recoveryPhraseKeyName, recoveryPhrase);
+      } catch (error) {
+        console.error('Error al guardar la frase de recuperación en AsyncStorage:', error);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const loadRecoveryPhrase = async () => {
+      try {
+        // Utiliza AsyncStorage para cargar la frase de recuperación en lugar de localStorage
+        const storedRecoveryPhrase = await AsyncStorage.getItem(recoveryPhraseKeyName);
+        if (storedRecoveryPhrase) {
+          // Si se encuentra una frase de recuperación almacenada, muestra el campo de recuperación
+          setShowRecoverInput(true);
+          setSeedphrase(storedRecoveryPhrase);
+        }
+      } catch (error) {
+        console.error('Error al cargar la frase de recuperación desde AsyncStorage:', error);
+      }
+    };
+    loadRecoveryPhrase();
+  }, []);
+
+  const createAccount = async () => {
+    const result = await generateAccount();
+    setAccount(result.account);
+  };
+
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <Text>Canaria's Coins Wallet</Text>
+      <Button title="Create Account" onPress={createAccount} />
+      <Button
+        title={showRecoverInput ? 'Recover Account' : 'Show Recover Input'}
+        onPress={handleRecoverPress}
+        disabled={showRecoverInput && !seedphrase}
+      />
+      {showRecoverInput && (
+        <TextInput
+          placeholder='Seedphrase or private key for recovery'
+          value={seedphrase}
+          onChangeText={handleChange}
+          onSubmitEditing={() => recoverAccount(seedphrase)}
+        />
+      )}
+      {account && (
+        <>
+          <View style={{ marginVertical: 10, borderBottomWidth: 1 }}>
+            <Text>Account Details:</Text>
+          </View>
+          <AccountDetail account={account} />
+        </>
+      )}
+    </View>
+  );
+}
+
+export default AccountCreate;
+AccountDetail.tsx : import React, { useEffect, useState } from 'react';
+import { sendToken } from '../utils/TransactionUtils';
+import { skale } from '../models/Chain';
+import { Account } from '../models/Account';
+
+import { JsonRpcProvider } from "@ethersproject/providers";
+import { ethers } from 'ethers';
+import { toFixedIfNecessary } from '../utils/AccountUtils';
+import { View, Text, TextInput, Button, Linking, ScrollView } from 'react-native';
+import FCCTokenAbi from "../abi/FCTToken.json";
+
+interface AccountDetailProps {
+  account: Account;
+}
+
+const AccountDetail: React.FC<AccountDetailProps> = ({ account }) => {
+  const [destinationAddress, setDestinationAddress] = useState('');
+  const [amount, setAmount] = useState('0');
+  const [balance, setBalance] = useState(account.balance.toString());
+
+  const [networkResponse, setNetworkResponse] = useState<{
+    status: null | 'pending' | 'complete' | 'error';
+    message: string | React.ReactElement;
+  }>({
+    status: null,
+    message: '',
+  });
+
+  useEffect(() => {
+    const fetchData = async () => {
+      const rpcUrl = "https://staging-v3.skalenodes.com/v1/staging-fast-active-bellatrix";
+      const provider = new JsonRpcProvider(rpcUrl);
+
+      const tokenAbi = FCCTokenAbi.abi;
+      const tokenContract = new ethers.Contract('0x873EB0641ac9077F27897b2cbF804D408256fEBb', tokenAbi, provider);
+      const tokenBalance = await tokenContract.balanceOf(account.address);
+
+      setBalance(tokenBalance.toString());
+    };
+    fetchData();
+  }, [account.address]);
+
+  const handleDestinationAddressChange = (text: string) => {
+    setDestinationAddress(text);
+  }
+
+  const handleAmountChange = (text: string) => {
+    setAmount(text);
+  }
+
+  const sendTokenTransaction = async () => {
+    try {
+      const amountValue = parseFloat(amount);
+
+      if (isNaN(amountValue) || amountValue <= 0) {
+        throw new Error("La cantidad debe ser un número positivo.");
+      }
+
+      const receipt = await sendToken(
+        amountValue,
+        account.address,
+        destinationAddress,
+        account.privateKey,
+        '0x873EB0641ac9077F27897b2cbF804D408256fEBb'
+      );
+
+      if (receipt.transactionHash) {
+        setNetworkResponse({
+          status: 'complete',
+          message: (
+            <Text>
+              ¡Transferencia completa!{' '}
+              <Text
+                onPress={() => Linking.openURL(`${skale.blockExplorerUrl}/tx/${receipt.transactionHash}`)}
+                style={{ color: 'blue' }}
+              >
+                Ver transacción
+              </Text>
+            </Text>
+          ),
+        });
+      } else {
+        console.log(`No se pudo enviar ${amountValue}`);
+        setNetworkResponse({
+          status: 'error',
+          message: 'Error desconocido al enviar la transacción.',
+        });
+      }
+    } catch (error: any) {
+      console.error({ error });
+      setNetworkResponse({
+        status: 'error',
+        message: error.message || 'Ocurrió un error al transferir tokens.',
+      });
+    }
+  }
+
+  return (
+    <ScrollView>
+      <View style={{ flex: 1, padding: 20 }}>
+        <Button
+          title="Verificar dirección"
+          onPress={() =>
+            Linking.openURL(`https://staging-fast-active-bellatrix.explorer.staging-v3.skalenodes.com/address/${account.address}`)
+          }
+        />
+        <Text style={{ marginBottom: 10 }}>Saldo: {(Number(balance) / 1000000000000000000).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} eCAN</Text>
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Dirección de destino"
+          onChangeText={handleDestinationAddressChange}
+          value={destinationAddress}
+        />
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Cantidad"
+          onChangeText={handleAmountChange}
+          value={amount}
+          keyboardType="numeric"
+        />
+
+        <Button
+          title={`Firmar y Enviar ${amount} eCAN`}
+          onPress={sendTokenTransaction}
+          disabled={!amount || networkResponse.status === 'pending'}
+        />
+
+        {networkResponse.status && (
+          <>
+            {networkResponse.status === 'pending' && <Text>La transferencia está pendiente...</Text>}
+            {networkResponse.status === 'complete' && <Text>{networkResponse.message}</Text>}
+            {networkResponse.status === 'error' && <Text>Ocurrió un error al transferir tokens: {networkResponse.message}</Text>}
+          </>
+        )}
+
+      </View>
+    </ScrollView>
+  );
+};
+
+export default AccountDetail;
+AccountUtils : import { Wallet } from 'ethers';
+import { Account } from '../models/Account';
+
+export function generateAccount(seedPhrase: string = "", index: number = 0): { account: Account, seedPhrase: string } {
+  let wallet: Wallet;
+
+  // Si no se proporciona una frase de semilla, generamos un mnemónico aleatorio usando un CSPRNG
+  if (seedPhrase === "") {
+    const randomWallet = Wallet.createRandom();
+    if (randomWallet.mnemonic) {
+      seedPhrase = randomWallet.mnemonic.phrase;
+    } else {
+      throw new Error("Fallo al generar un mnemónico.");
+    }
+  }
+
+  // Si la frase de semilla no contiene espacios, probablemente sea un mnemónico
+  if (seedPhrase.includes(" ")) {
+    wallet = Wallet.fromMnemonic(seedPhrase, `m/44'/60'/0'/0/${index}`);
+  } else {
+    wallet = new Wallet(seedPhrase);
+  }
+
+  if (!wallet) {
+    throw new Error("Fallo al crear una billetera.");
+  }
+
+  const { address } = wallet;
+  const account = { address, privateKey: wallet.privateKey, balance: "0" };
+  
+  // Si la frase de semilla no incluye espacios, entonces es en realidad una clave privada, así que devolvemos una cadena en blanco.
+  return { account, seedPhrase: seedPhrase.includes(" ") ? seedPhrase : "" };
+}
+
+export function shortenAddress(str: string, numChars: number = 4) {
+  return `${str.substring(0, numChars)}...${str.substring(str.length - numChars)}`;
+}
+
+export function toFixedIfNecessary(value: string, decimalPlaces: number = 2) {
+  return +parseFloat(value).toFixed(decimalPlaces);
+}
+database.js : import { Wallet } from 'ethers';
+import { Account } from '../models/Account';
+
+export function generateAccount(seedPhrase: string = "", index: number = 0): { account: Account, seedPhrase: string } {
+  let wallet: Wallet;
+
+  // Si no se proporciona una frase de semilla, generamos un mnemónico aleatorio usando un CSPRNG
+  if (seedPhrase === "") {
+    const randomWallet = Wallet.createRandom();
+    if (randomWallet.mnemonic) {
+      seedPhrase = randomWallet.mnemonic.phrase;
+    } else {
+      throw new Error("Fallo al generar un mnemónico.");
+    }
+  }
+
+  // Si la frase de semilla no contiene espacios, probablemente sea un mnemónico
+  if (seedPhrase.includes(" ")) {
+    wallet = Wallet.fromMnemonic(seedPhrase, `m/44'/60'/0'/0/${index}`);
+  } else {
+    wallet = new Wallet(seedPhrase);
+  }
+
+  if (!wallet) {
+    throw new Error("Fallo al crear una billetera.");
+  }
+
+  const { address } = wallet;
+  const account = { address, privateKey: wallet.privateKey, balance: "0" };
+  
+  // Si la frase de semilla no incluye espacios, entonces es en realidad una clave privada, así que devolvemos una cadena en blanco.
+  return { account, seedPhrase: seedPhrase.includes(" ") ? seedPhrase : "" };
+}
+
+export function shortenAddress(str: string, numChars: number = 4) {
+  return `${str.substring(0, numChars)}...${str.substring(str.length - numChars)}`;
+}
+
+export function toFixedIfNecessary(value: string, decimalPlaces: number = 2) {
+  return +parseFloat(value).toFixed(decimalPlaces);
+}
+App.tsx : import React, { useEffect, useState } from 'react';
+import { View, StyleSheet } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { NavigationContainer } from '@react-navigation/native';
+import { createStackNavigator } from '@react-navigation/stack';
+import Navigation from './src/Navigation';
+import Header from './src/screen/Header';
+import { initializeApp } from '@react-native-firebase/app'; 
+import { Provider } from 'react-redux';
+import store from './src/store/index.js';
+
+import { RouteProp } from '@react-navigation/native';
+
+// Inicializa Firebase antes de cualquier uso
+const firebaseConfig = {
+  apiKey: "AIzaSyB4EWCWGHjTpb60Qf2R8opmch5Rym79dLo",
+  authDomain: "myapp-2f8e1.firebaseapp.com",
+  projectId: "myapp-2f8e1",
+  databaseURL: "https://myapp-2f8e1.firebaseio.com",
+  storageBucket: "myapp-2f8e1.appspot.com",
+  messagingSenderId: "104956284102",
+  appId: "1:104956284102:web:d6dc189dae34d3aeb11bc7",
+  measurementId: "G-RCFY2VF137"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+
+const Stack = createStackNavigator();
+
+// Define el tipo de AccountData
+interface AccountData {
+  address: string;
+  seedPhrase: string;
+}
+
+const App = () => {
+  const [usuarioRegistrado, setUsuarioRegistrado] = useState(false);
+
+  useEffect(() => {
+    verificarRegistro();
+  }, []);
+
+  const verificarRegistro = async () => {
+    try {
+      const valor = await AsyncStorage.getItem('usuarioRegistrado');
+      if (valor === 'true') {
+        setUsuarioRegistrado(true);
+      }
+    } catch (error) {
+      console.error('Error al verificar el registro:', error);
+    }
+  };
+
+  const handleRegistroCompleto = async (accountData: AccountData) => {
+    try {
+      // Guarda el registro de usuario como "registrado"
+      await AsyncStorage.setItem('usuarioRegistrado', 'true');
+      setUsuarioRegistrado(true);
+
+      // Ahora, guarda los datos de la billetera en Firebase
+      const user = firebaseApp.auth().currentUser;
+
+      if (user) {
+        const uid = user.uid;
+        const userData = {
+          nombre: user.displayName || "",
+          correo: user.email || "",
+          direccion_wallet: accountData.address,
+          seedkey: accountData.seedPhrase || "", // Verifica si 'seedPhrase' es nulo
+        };
+
+        // Guarda los datos del usuario en Firebase Realtime Database
+        await firebaseApp.database().ref(`usuarios/${uid}`).set(userData);
+      } else {
+        console.error('Usuario no autenticado');
+      }
+    } catch (error) {
+      console.error('Error al guardar el registro:', error);
+    }
+  };
+
+  return (
+    <Provider store={store}>
+      <NavigationContainer>
+        <Stack.Navigator initialRouteName="Main">
+          <Stack.Screen
+            name="Main"
+            component={Navigation}
+            options={({ route, navigation }) => ({
+              header: () => (
+                <Header
+                  onRegistroCompleto={handleRegistroCompleto}
+                  route={route}
+                  navigation={navigation}
+                />
+              ),
+            })}
+          />
+        </Stack.Navigator>
+      </NavigationContainer>
+    </Provider>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'white',
+  },
+});
+
+export default App; FirebaseConfig.js : import { initializeApp } from '@react-native-firebase/app';
+import { getFirestore } from '@react-native-firebase/firestore';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB4EWCWGHjTpb60Qf2R8opmch5Rym79dLo",
+  authDomain: "myapp-2f8e1.firebaseapp.com",
+  projectId: "myapp-2f8e1",
+  databaseURL: "https://myapp-2f8e1-default-rtdb.europe-west1.firebasedatabase.app", 
+  storageBucket: "myapp-2f8e1.appspot.com",
+  messagingSenderId: "104956284102",
+  appId: "1:104956284102:web:d6dc189dae34d3aeb11bc7",
+  measurementId: "G-RCFY2VF137"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+
+// Obtén la instancia de Firestore
+const firestore = getFirestore(firebaseApp);
+
+export { firebaseApp, firestore };
+database.js : import { getDatabase, ref, set } from 'firebase/database';
+import { firebaseApp } from './FirebaseConfig';
+
+// Función para guardar datos de usuario en la base de datos
+export const guardarDatosUsuario = (uid, nombre, correo, direccion_wallet, seedkey) => {
+  const db = getDatabase(firebaseApp);
+  const userRef = ref(db, `usuarios/${uid}`);
+  
+  return set(userRef, {
+    nombre,
+    correo,
+    direccion_wallet,
+    seedkey,
+  });
+};
+
+// mineGasForTransaction.js
+import BN from "bn.js";
+import { randomBytes } from 'react-native-crypto';
+
+const DIFFICULTY = new BN(1);
+
+async function mineGasForTransaction(web3, tx) {
+    if(tx.from === undefined || tx.nonce === undefined) {
+        throw new Error("Not enough fields for mining gas (from, nonce)")
+    }
+    if (!tx.gas) {
+        tx.gas = await web3.eth.estimateGas(tx)
+    }
+    let address = tx.from
+    let nonce = web3.utils.isHex(tx.nonce) ? web3.utils.hexToNumber(tx.nonce) : tx.nonce;
+    let gas = web3.utils.isHex(tx.gas) ? web3.utils.hexToNumber(tx.gas) : tx.gas;
+    return mineFreeGas(gas, address, nonce, web3); // Asegúrate de devolver un valor numérico
+}
+
+
+function mineFreeGas(gasAmount, address, nonce, web3) {
+    console.log('Mining free gas: ', gasAmount);
+    let nonceHash = new BN(web3.utils.soliditySha3(nonce).slice(2), 16);
+    let addressHash = new BN(web3.utils.soliditySha3(address).slice(2), 16);
+    let nonceAddressXOR = nonceHash.xor(addressHash);
+    let maxNumber = new BN(2).pow(new BN(256)).sub(new BN(1));
+    let divConstant = maxNumber.div(DIFFICULTY);
+    let candidate;
+    while (true){
+        candidate = new BN(randomBytes(32).toString('hex'), 16);
+        let candidateHash = new BN(web3.utils.soliditySha3(candidate).slice(2), 16);
+        let resultHash = nonceAddressXOR.xor(candidateHash);
+        let externalGas = divConstant.div(resultHash).toNumber();
+        if (externalGas >= gasAmount) {
+            break;
+        }
+    }
+    return candidate.toString();
+}
+
+const _mineGasForTransaction = mineGasForTransaction;
+export { _mineGasForTransaction as mineGasForTransaction };
+

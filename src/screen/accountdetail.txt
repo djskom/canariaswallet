@@ -1,0 +1,706 @@
+ //AccountDetail.tsx : 
+ import React, { useEffect, useState } from 'react';
+import { sendToken } from '../utils/TransactionUtils';
+import { skale } from '../models/Chain';
+import { Account } from '../models/Account';
+
+import { JsonRpcProvider } from "@ethersproject/providers";
+import { ethers } from 'ethers';
+import { toFixedIfNecessary } from '../utils/AccountUtils';
+import { View, Text, TextInput, Button, Linking, ScrollView } from 'react-native';
+import FCCTokenAbi from "../abi/FCTToken.json";
+
+interface AccountDetailProps {
+  account: Account | undefined; // Asegura que account pueda ser undefined
+}
+
+const AccountDetail: React.FC<AccountDetailProps> = ({ account }) => {
+  const [destinationAddress, setDestinationAddress] = useState('');
+  const [amount, setAmount] = useState('0');
+  const [balance, setBalance] = useState(account ? account.balance.toString() : '0'); // Accede a account.balance si account no es undefined
+
+  const [networkResponse, setNetworkResponse] = useState<{
+    status: null | 'pending' | 'complete' | 'error';
+    message: string | React.ReactElement;
+  }>({
+    status: null,
+    message: '',
+  });
+
+  useEffect(() => {
+    if (account) { // Asegura que account no sea undefined
+      const fetchData = async () => {
+        const rpcUrl = "https://staging-v3.skalenodes.com/v1/staging-fast-active-bellatrix";
+        const provider = new JsonRpcProvider(rpcUrl);
+
+        const tokenAbi = FCCTokenAbi.abi;
+        const tokenContract = new ethers.Contract('0x873EB0641ac9077F27897b2cbF804D408256fEBb', tokenAbi, provider);
+        const tokenBalance = await tokenContract.balanceOf(account.address);
+
+        setBalance(tokenBalance.toString());
+      };
+      fetchData();
+    }
+  }, [account]);
+
+  const handleDestinationAddressChange = (text: string) => {
+    setDestinationAddress(text);
+  }
+
+  const handleAmountChange = (text: string) => {
+    setAmount(text);
+  }
+
+  const sendTokenTransaction = async () => {
+    try {
+      const amountValue = parseFloat(amount);
+
+      if (isNaN(amountValue) || amountValue <= 0) {
+        throw new Error("La cantidad debe ser un número positivo.");
+      }
+
+      if (account) { // Asegura que account no sea undefined
+        const receipt = await sendToken(
+          amountValue,
+          account.address,
+          destinationAddress,
+          account.privateKey,
+          '0x873EB0641ac9077F27897b2cbF804D408256fEBb'
+        );
+
+        if (receipt.transactionHash) {
+          setNetworkResponse({
+            status: 'complete',
+            message: (
+              <Text>
+                ¡Transferencia completa!{' '}
+                <Text
+                  onPress={() => Linking.openURL(`${skale.blockExplorerUrl}/tx/${receipt.transactionHash}`)}
+                  style={{ color: 'blue' }}
+                >
+                  Ver transacción
+                </Text>
+              </Text>
+            ),
+          });
+        } else {
+          console.log(`No se pudo enviar ${amountValue}`);
+          setNetworkResponse({
+            status: 'error',
+            message: 'Error desconocido al enviar la transacción.',
+          });
+        }
+      }
+    } catch (error: any) {
+      console.error({ error });
+      setNetworkResponse({
+        status: 'error',
+        message: error.message || 'Ocurrió un error al transferir tokens.',
+      });
+    }
+  }
+
+  return (
+    <ScrollView>
+      <View style={{ flex: 1, padding: 20 }}>
+        <Button
+          title="Verificar dirección"
+          onPress={() =>
+            Linking.openURL(`https://staging-fast-active-bellatrix.explorer.staging-v3.skalenodes.com/address/${account?.address}`)
+          }
+        />
+        <Text style={{ marginBottom: 10 }}>Saldo: {(Number(balance) / 1000000000000000000).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} eCAN</Text>
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Dirección de destino"
+          onChangeText={handleDestinationAddressChange}
+          value={destinationAddress}
+        />
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Cantidad"
+          onChangeText={handleAmountChange}
+          value={amount}
+          keyboardType="numeric"
+        />
+
+        <Button
+          title={`Firmar y Enviar ${amount} eCAN`}
+          onPress={sendTokenTransaction}
+          disabled={!amount || networkResponse.status === 'pending'}
+        />
+
+        {networkResponse.status && (
+          <>
+            {networkResponse.status === 'pending' && <Text>La transferencia está pendiente...</Text>}
+            {networkResponse.status === 'complete' && <Text>{networkResponse.message}</Text>}
+            {networkResponse.status === 'error' && <Text>Ocurrió un error al transferir tokens: {networkResponse.message}</Text>}
+          </>
+        )}
+      </View>
+    </ScrollView>
+  );
+};
+
+export default AccountDetail; 
+
+//wallet.tsx :
+import React, { useEffect, useState } from 'react';
+import { View, Text, TextInput, Button, Linking, ScrollView } from 'react-native';
+import { JsonRpcProvider } from "@ethersproject/providers";
+import { ethers } from 'ethers';
+import firestore from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
+import FCCTokenAbi from "../abi/FCTToken.json";
+import { sendToken } from '../utils/TransactionUtils';
+import { skale } from '../models/Chain';
+import { Account } from '../models/Account';
+
+const Wallet = () => {
+  const [destinationAddress, setDestinationAddress] = useState('');
+  const [amount, setAmount] = useState('0');
+  const [balance, setBalance] = useState('0');
+  const [networkResponse, setNetworkResponse] = useState({
+    status: null,
+    message: '',
+  });
+  const [userData, setUserData] = useState(null);
+
+  useEffect(() => {
+    const user = auth().currentUser;
+
+    if (user) {
+      const uid = user.uid;
+
+      const fetchUserData = async () => {
+        try {
+          const walletData = await firestore()
+            .collection('wallets')
+            .doc(uid)
+            .get();
+
+          if (walletData.exists) {
+            setUserData(walletData.data());
+          } else {
+            setUserData(null);
+          }
+        } catch (error) {
+          console.error('Error al obtener datos de Firestore:', error);
+        }
+      };
+
+      fetchUserData();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (userData) {
+      const rpcUrl = "https://staging-v3.skalenodes.com/v1/staging-fast-active-bellatrix";
+      const provider = new JsonRpcProvider(rpcUrl);
+
+      const tokenAbi = FCCTokenAbi.abi;
+      const tokenContract = new ethers.Contract('0x873EB0641ac9077F27897b2cbF804D408256fEBb', tokenAbi, provider);
+
+      const fetchBalance = async () => {
+        if (userData.address) {
+          const tokenBalance = await tokenContract.balanceOf(userData.address);
+          setBalance(tokenBalance.toString());
+        }
+      };
+
+      fetchBalance();
+    }
+  }, [userData]);
+
+  const handleDestinationAddressChange = (text) => {
+    setDestinationAddress(text);
+  };
+
+  const handleAmountChange = (text) => {
+    setAmount(text);
+  };
+
+  const sendTokenTransaction = async () => {
+    try {
+      const amountValue = parseFloat(amount);
+
+      if (isNaN(amountValue) || amountValue <= 0) {
+        throw new Error("La cantidad debe ser un número positivo.");
+      }
+
+      if (userData) {
+        const receipt = await sendToken(
+          amountValue,
+          userData.address,
+          destinationAddress,
+          userData.SeedPhrase,
+          '0x873EB0641ac9077F27897b2cbF804D408256fEBb'
+        );
+
+        if (receipt.transactionHash) {
+          setNetworkResponse({
+            status: 'complete',
+            message: (
+              <Text>
+                ¡Transferencia completa!{' '}
+                <Text
+                  onPress={() => Linking.openURL(`${skale.blockExplorerUrl}/tx/${receipt.transactionHash}`)}
+                  style={{ color: 'blue' }}
+                >
+                  Ver transacción
+                </Text>
+              </Text>
+            ),
+          });
+        } else {
+          console.log(`No se pudo enviar ${amountValue}`);
+          setNetworkResponse({
+            status: 'error',
+            message: 'Error desconocido al enviar la transacción.',
+          });
+        }
+      }
+    } catch (error) {
+      console.error({ error });
+      setNetworkResponse({
+        status: 'error',
+        message: error.message || 'Ocurrió un error al transferir tokens.',
+      });
+    }
+  };
+
+  return (
+    <ScrollView>
+      <View style={{ flex: 1, padding: 20 }}>
+        <Button
+          title="Verificar dirección"
+          onPress={() => {
+            if (userData && userData.address) {
+              Linking.openURL(`https://staging-fast-active-bellatrix.explorer.staging-v3.skalenodes.com/address/${userData.address}`);
+            }
+          }}
+        />
+        <Text style={{ marginBottom: 10 }}>Saldo: {(Number(balance) / 1000000000000000000).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} eCAN</Text>
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Dirección de destino"
+          onChangeText={handleDestinationAddressChange}
+          value={destinationAddress}
+        />
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Cantidad"
+          onChangeText={handleAmountChange}
+          value={amount}
+          keyboardType="numeric"
+        />
+
+        <Button
+          title={`Firmar y Enviar ${amount} eCAN`}
+          onPress={sendTokenTransaction}
+          disabled={!amount || networkResponse.status === 'pending'}
+        />
+
+        {networkResponse.status && (
+          <>
+            {networkResponse.status === 'pending' && <Text>La transferencia está pendiente...</Text>}
+            {networkResponse.status === 'complete' && <Text>{networkResponse.message}</Text>}
+            {networkResponse.status === 'error' && <Text>Ocurrió un error al transferir tokens: {networkResponse.message}</Text>}
+          </>
+        )}
+      </View>
+    </ScrollView>
+  );
+};
+
+export default Wallet;
+
+//transactionUtils.tsx :
+import { ethers, Wallet, Contract, ContractReceipt } from 'ethers';
+import { skale } from '../models/Chain'; 
+import FCCTokenAbi from "../abi/FCTToken.json"; 
+
+export async function sendToken(
+  amount: number,
+  from: string,
+  to: string,
+  privateKey: string,
+  tokenContractAddress: string,
+): Promise<ContractReceipt> {
+  try {
+    const rpcUrl = skale.rpcUrl; 
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+
+    const wallet = new Wallet(privateKey, provider);
+
+    // Utiliza el ABI importado
+    const tokenContract = new Contract(tokenContractAddress, FCCTokenAbi.abi, wallet);
+
+    const amountInWei = ethers.utils.parseUnits(amount.toString(), 18);
+
+    const transaction = await tokenContract.transfer(to, amountInWei);
+    const receipt = await transaction.wait();
+
+    return receipt;
+  } catch (error) {
+    console.error("Error en la transferencia:", error);
+    throw error;
+  }
+}
+
+//mineGasForTransaction.js :
+import BN from "bn.js";
+import { randomBytes } from 'react-native-crypto';
+
+const DIFFICULTY = new BN(1);
+
+async function mineGasForTransaction(web3, tx) {
+    if(tx.from === undefined || tx.nonce === undefined) {
+        throw new Error("Not enough fields for mining gas (from, nonce)")
+    }
+    if (!tx.gas) {
+        tx.gas = await web3.eth.estimateGas(tx)
+    }
+    let address = tx.from
+    let nonce = web3.utils.isHex(tx.nonce) ? web3.utils.hexToNumber(tx.nonce) : tx.nonce;
+    let gas = web3.utils.isHex(tx.gas) ? web3.utils.hexToNumber(tx.gas) : tx.gas;
+    return mineFreeGas(gas, address, nonce, web3); // Asegúrate de devolver un valor numérico
+}
+
+
+function mineFreeGas(gasAmount, address, nonce, web3) {
+    console.log('Mining free gas: ', gasAmount);
+    let nonceHash = new BN(web3.utils.soliditySha3(nonce).slice(2), 16);
+    let addressHash = new BN(web3.utils.soliditySha3(address).slice(2), 16);
+    let nonceAddressXOR = nonceHash.xor(addressHash);
+    let maxNumber = new BN(2).pow(new BN(256)).sub(new BN(1));
+    let divConstant = maxNumber.div(DIFFICULTY);
+    let candidate;
+    while (true){
+        candidate = new BN(randomBytes(32).toString('hex'), 16);
+        let candidateHash = new BN(web3.utils.soliditySha3(candidate).slice(2), 16);
+        let resultHash = nonceAddressXOR.xor(candidateHash);
+        let externalGas = divConstant.div(resultHash).toNumber();
+        if (externalGas >= gasAmount) {
+            break;
+        }
+    }
+    return candidate.toString();
+}
+
+const _mineGasForTransaction = mineGasForTransaction;
+export { _mineGasForTransaction as mineGasForTransaction };
+
+//AccountCreate.tsx:
+import React, { useCallback, useEffect, useState } from 'react';
+import { generateAccount } from '../utils/AccountUtils';
+import { Account } from '../models/Account';
+import AccountDetail from './AccountDetail';
+import { View, Text, TextInput, Button } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { initializeApp } from '@firebase/app'; // Importa initializeApp desde '@firebase/app'
+import auth from '@react-native-firebase/auth'; // Importa auth desde '@react-native-firebase/auth'
+import firestore from '@react-native-firebase/firestore'; // Importa firestore desde '@react-native-firebase/firestore'
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB4EWCWGHjTpb60Qf2R8opmch5Rym79dLo",
+  authDomain: "myapp-2f8e1.firebaseapp.com",
+  projectId: "myapp-2f8e1",
+  databaseURL: "https://myapp-2f8e1-default-rtdb.europe-west1.firebasedatabase.app", 
+  storageBucket: "myapp-2f8e1.appspot.com",
+  messagingSenderId: "104956284102",
+  appId: "1:104956284102:web:d6dc189dae34d3aeb11bc7",
+  measurementId: "G-RCFY2VF137"
+};
+
+// Inicializa Firebase con la configuración
+const firebaseApp = initializeApp(firebaseConfig);
+
+const recoveryPhraseKeyName = 'recoveryPhrase';
+
+function AccountCreate() {
+  const [seedphrase, setSeedphrase] = useState('');
+  const [account, setAccount] = useState<Account | null>(null);
+  const [showRecoverInput, setShowRecoverInput] = useState(false);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletSeedPhrase, setWalletSeedPhrase] = useState<string | null>(null);
+
+  const handleChange = (text: string) => {
+    setSeedphrase(text);
+  };
+
+  const recoverAccount = useCallback(async (recoveryPhrase: string) => {
+    const result = await generateAccount(recoveryPhrase);
+    setAccount(result.account);
+
+    if (recoveryPhraseKeyName !== recoveryPhrase) {
+      try {
+        // Utiliza AsyncStorage para almacenar la frase de recuperación en lugar de localStorage
+        await AsyncStorage.setItem(recoveryPhraseKeyName, recoveryPhrase);
+      } catch (error) {
+        console.error('Error al guardar la frase de recuperación en AsyncStorage:', error);
+      }
+    }
+  }, []);
+
+  const createAccount = async () => {
+    const result = await generateAccount();
+    setAccount(result.account);
+
+    // Aquí también guardamos los datos en Firestore si es necesario
+    const user = auth().currentUser; // Utiliza auth() en lugar de firebaseApp.auth()
+    if (user) {
+      const uid = user.uid;
+
+      try {
+        await firestore().collection('wallets').doc(uid).set({
+          address: result.account.address,
+          seedPhrase: result.seedPhrase,
+        });
+      } catch (error) {
+        console.error('Error al guardar en Firestore:', error);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const loadRecoveryPhrase = async () => {
+      try {
+        // Utiliza AsyncStorage para cargar la frase de recuperación en lugar de localStorage
+        const storedRecoveryPhrase = await AsyncStorage.getItem(recoveryPhraseKeyName);
+        if (storedRecoveryPhrase) {
+          // Si se encuentra una frase de recuperación almacenada, muestra el campo de recuperación
+          setShowRecoverInput(true);
+          setSeedphrase(storedRecoveryPhrase);
+        }
+      } catch (error) {
+        console.error('Error al cargar la frase de recuperación desde AsyncStorage:', error);
+      }
+    };
+    loadRecoveryPhrase();
+  }, []);
+
+  const handleRecoverPress = () => {
+    if (showRecoverInput) {
+      recoverAccount(seedphrase);
+    } else {
+      setShowRecoverInput(true);
+    }
+  };
+
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <Text>Canaria's Coins Wallet</Text>
+      <Button title="Create Account" onPress={createAccount} />
+      <Button
+        title={showRecoverInput ? 'Recover Account' : 'Show Recover Input'}
+        onPress={handleRecoverPress}
+        disabled={showRecoverInput && !seedphrase}
+      />
+      {showRecoverInput && (
+        <TextInput
+          placeholder='Seedphrase or private key for recovery'
+          value={seedphrase}
+          onChangeText={handleChange}
+          onSubmitEditing={() => recoverAccount(seedphrase)}
+        />
+      )}
+      {account && (
+        <>
+          <View style={{ marginVertical: 10, borderBottomWidth: 1 }}>
+            <Text>Account Details:</Text>
+          </View>
+          <AccountDetail account={account} />
+        </>
+      )}
+    </View>
+  );
+}
+
+export default AccountCreate;
+
+wallet.tsx:
+import React, { useEffect, useState } from 'react';
+import { View, Text, TextInput, Button, Linking, ScrollView } from 'react-native';
+import { JsonRpcProvider } from "@ethersproject/providers";
+import { ethers } from 'ethers';
+import firestore from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
+import FCCTokenAbi from "../abi/FCTToken.json";
+import { sendToken } from '../utils/TransactionUtils';
+import { skale } from '../models/Chain';
+import { Account } from '../models/Account';
+
+const Wallet = () => {
+  const [destinationAddress, setDestinationAddress] = useState('');
+  const [amount, setAmount] = useState('0');
+  const [balance, setBalance] = useState('0');
+  const [networkResponse, setNetworkResponse] = useState({
+    status: null,
+    message: '',
+  });
+  const [userData, setUserData] = useState(null);
+
+  useEffect(() => {
+    const user = auth().currentUser;
+
+    if (user) {
+      const uid = user.uid;
+
+      const fetchUserData = async () => {
+        try {
+          const walletData = await firestore()
+            .collection('wallets')
+            .doc(uid)
+            .get();
+
+          if (walletData.exists) {
+            setUserData(walletData.data());
+          } else {
+            setUserData(null);
+          }
+        } catch (error) {
+          console.error('Error al obtener datos de Firestore:', error);
+        }
+      };
+
+      fetchUserData();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (userData) {
+      const rpcUrl = "https://staging-v3.skalenodes.com/v1/staging-fast-active-bellatrix";
+      const provider = new JsonRpcProvider(rpcUrl);
+
+      const tokenAbi = FCCTokenAbi.abi;
+      const tokenContract = new ethers.Contract('0x873EB0641ac9077F27897b2cbF804D408256fEBb', tokenAbi, provider);
+
+      const fetchBalance = async () => {
+        if (userData.address) {
+          const tokenBalance = await tokenContract.balanceOf(userData.address);
+          setBalance(tokenBalance.toString());
+        }
+      };
+
+      fetchBalance();
+    }
+  }, [userData]);
+
+  const handleDestinationAddressChange = (text) => {
+    setDestinationAddress(text);
+  };
+
+  const handleAmountChange = (text) => {
+    setAmount(text);
+  };
+
+  const sendTokenTransaction = async () => {
+    try {
+      const amountValue = parseFloat(amount);
+
+      if (isNaN(amountValue) || amountValue <= 0) {
+        throw new Error("La cantidad debe ser un número positivo.");
+      }
+
+      if (userData) {
+        const receipt = await sendToken(
+          amountValue,
+          userData.address,
+          destinationAddress,
+          userData.SeedPhrase,
+          '0x873EB0641ac9077F27897b2cbF804D408256fEBb'
+        );
+
+        if (receipt.transactionHash) {
+          setNetworkResponse({
+            status: 'complete',
+            message: (
+              <Text>
+                ¡Transferencia completa!{' '}
+                <Text
+                  onPress={() => Linking.openURL(`${skale.blockExplorerUrl}/tx/${receipt.transactionHash}`)}
+                  style={{ color: 'blue' }}
+                >
+                  Ver transacción
+                </Text>
+              </Text>
+            ),
+          });
+        } else {
+          console.log(`No se pudo enviar ${amountValue}`);
+          setNetworkResponse({
+            status: 'error',
+            message: 'Error desconocido al enviar la transacción.',
+          });
+        }
+      }
+    } catch (error) {
+      console.error({ error });
+      setNetworkResponse({
+        status: 'error',
+        message: error.message || 'Ocurrió un error al transferir tokens.',
+      });
+    }
+  };
+
+  return (
+    <ScrollView>
+      <View style={{ flex: 1, padding: 20 }}>
+        <Button
+          title="Verificar dirección"
+          onPress={() => {
+            if (userData && userData.address) {
+              Linking.openURL(`https://staging-fast-active-bellatrix.explorer.staging-v3.skalenodes.com/address/${userData.address}`);
+            }
+          }}
+        />
+        <Text style={{ marginBottom: 10 }}>Saldo: {(Number(balance) / 1000000000000000000).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} eCAN</Text>
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Dirección de destino"
+          onChangeText={handleDestinationAddressChange}
+          value={destinationAddress}
+        />
+
+        <TextInput
+          style={{ height: 40, borderColor: 'gray', borderWidth: 1, marginBottom: 10 }}
+          placeholder="Cantidad"
+          onChangeText={handleAmountChange}
+          value={amount}
+          keyboardType="numeric"
+        />
+
+        <Button
+          title={`Firmar y Enviar ${amount} eCAN`}
+          onPress={sendTokenTransaction}
+          disabled={!amount || networkResponse.status === 'pending'}
+        />
+
+        {networkResponse.status && (
+          <>
+            {networkResponse.status === 'pending' && <Text>La transferencia está pendiente...</Text>}
+            {networkResponse.status === 'complete' && <Text>{networkResponse.message}</Text>}
+            {networkResponse.status === 'error' && <Text>Ocurrió un error al transferir tokens: {networkResponse.message}</Text>}
+          </>
+        )}
+      </View>
+    </ScrollView>
+  );
+};
+
+export default Wallet;
